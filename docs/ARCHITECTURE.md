@@ -24,9 +24,19 @@ Inspecting the recording has no connection back to the original source. An appli
 
 ## Recording responsibilities
 
-`createRecorder()` owns a recording session, stream definitions, a clock origin, a sequence counter, subscription identifiers, and the retained prefix of events. Its `trace()` operator observes each connection at the named boundary.
+`createRecorder()` owns a recording session, stream definitions, a clock origin, a sequence counter, execution/subscription identifiers, and the retained prefix of events. Its `trace()` operator observes each connection at the named boundary. Its `switchMap()` adapter delegates to RxJS's actual policy while observing input, output, and inner connections.
 
 The instrumentation preserves live notification identity and ordinary RxJS subscription ownership. The stored representation is detached. Capturing an `Error` for inspection does not replace the error object delivered through the live pipeline.
+
+### Execution groups and replayable channels
+
+Schema version 2 separates execution identity from subscription identity. An operator's input and output share an `executionId`, but each has its own `subscriptionId`. Inner executions carry explicit `ownerExecutionId` metadata. This allows an input to complete while the output continues, without weakening the single-subscription notification protocol or changing notification replay.
+
+The adapter invokes the domain projector at RxJS's own projection point and converts its returned `ObservableInput` there. Reentrant input is preserved. If projection has already closed the inner destination, the returned Observable still receives the closed subscriber as it does in RxJS, preserving source setup/teardown without fabricating an active inner lifecycle.
+
+Forwarding subscribers are attached to their destinations before upstream begins. Synchronous `take(1)` or explicit disposal therefore closes the source immediately. The adapter keeps completion/error notifications separate from observed subscription disposal.
+
+Existing Replay schema version 1 is validated and kept unchanged. Analysis can show its individual subscriptions as boundary groups; it cannot infer operator roles or ownership that were never captured.
 
 ### Ordering
 
@@ -55,10 +65,14 @@ The query functions operate on immutable captured data:
 - `selectEvents` filters events by explicit metadata and ranges.
 - `inspectAt` folds the retained prefix through a cursor to derive subscription views.
 - `evaluateLogpoint` runs a user predicate/projection on captured events, preserving the source event for each result.
+- `getExecutions` groups independent notification channels into recorded executions and their explicitly owned inners.
+- `getSwitchMapState` reconstructs the supported operator state at the cursor; `explainEvent` relates an event to its observed context and declared policy.
 
 The derived view remembers the most recently observed values and state for each instrumented subscription. An outcome of `active` means that no ending is visible through the selected cursor. It does not assert that the original resource remains active now.
 
 For a stopped or truncated recording, later activity may be unknown. Analysis should retain that uncertainty rather than infer a future terminal notification.
+
+The operator model observes notification activity separately from disposal. A completed inner followed by its disposal is one ended inner, not two endings. Output termination can be visible before inner cleanup at an intermediate cursor. Reentrant overlapping inners remain recorded facts but exceed the current single-active-inner model; the explanation becomes unavailable. [Operator inspection](OPERATOR_INSPECTION.md) documents this boundary.
 
 ## Replay controller: Input Controller and Action Policy
 
@@ -136,7 +150,7 @@ The `/viewer` entry point consumes the core APIs and owns its controller/renderi
 3. **Internal behavior** — boundaries declared as `internal` and their captured observations.
 4. **Resulting emissions** — events from boundaries declared as `result`.
 
-The declared `inputs` graph and `sharing` metadata explain the application author's model. They are not inferred from value equality or the timing of events. The viewer also presents event details and subscription outcomes derived through the cursor.
+The declared `inputs` graph and `sharing` metadata explain the application author's model. They are not inferred from value equality or the timing of events. Graph stages carry operator/domain labels and coordinate with the selected events. Execution groups show separate input/output lifetimes with explicitly owned inner subscriptions. Operator explanations come from the pure core analysis API and use the same history cursor as the timeline.
 
 Imported values are text. Import does not run recorded code or reconstruct an executable function from a string.
 

@@ -1,32 +1,31 @@
-import { VirtualTimeScheduler, map, scan, switchMap, take, timer } from 'rxjs';
+import { VirtualTimeScheduler, map, scan, take, timer } from 'rxjs';
 import { createRecorder } from '../src/recorder.js';
 import type { Recording } from '../src/types.js';
 
-/** Real switchMap execution: two inner subscriptions are replaced, the latest finishes. */
+/** Real switchMap execution: A is cancelled, the outer completes, and B remains active until its result. */
 export function recordSearch(): Recording {
   const scheduler = new VirtualTimeScheduler();
   const recorder = createRecorder({
-    name: 'Only the latest search survives',
+    name: 'Outer completed. Latest inner still active.',
     clock: { name: 'virtual search clock', now: () => scheduler.now() },
     streams: [
       { id: 'queries', label: 'queries$', lane: 'source', sharing: 'independent' },
-      { id: 'requests', label: 'request$', lane: 'internal', inputs: ['queries'], sharing: 'independent' },
-      { id: 'results', label: 'results$', lane: 'result', inputs: ['requests'], sharing: 'independent' },
+      { id: 'latest', label: 'latest result', lane: 'internal', inputs: ['queries'], sharing: 'independent', operator: 'switchMap', domain: 'loadResult$' },
+      { id: 'results', label: 'results$', lane: 'result', inputs: ['latest'], sharing: 'independent' },
     ],
   });
-  const queries = ['r', 'rx', 'rxjs'];
+  const queries = ['A', 'B'];
   function queryAt(index: number): string { return queries[index]!; }
   function loadResult$(query: string) {
     return timer(900, scheduler).pipe(
       map(() => ({ query, title: `Results for ${query}` })),
-      recorder.trace('requests'),
     );
   }
   timer(0, 700, scheduler).pipe(
     take(queries.length),
     map(queryAt),
     recorder.trace('queries'),
-    switchMap(loadResult$),
+    recorder.switchMap('latest', loadResult$),
     recorder.trace('results'),
   ).subscribe();
   scheduler.flush();
@@ -41,8 +40,8 @@ export function recordCounter(): Recording {
     clock: { name: 'virtual counter clock', now: () => scheduler.now() },
     streams: [
       { id: 'actions', label: 'adjustments$', lane: 'source', sharing: 'independent' },
-      { id: 'state', label: 'accumulator$', lane: 'internal', inputs: ['actions'], sharing: 'independent' },
-      { id: 'view', label: 'view$', lane: 'result', inputs: ['state'], sharing: 'independent' },
+      { id: 'state', label: 'accumulator$', lane: 'internal', inputs: ['actions'], sharing: 'independent', operator: 'scan', domain: 'updateCounter' },
+      { id: 'view', label: 'view$', lane: 'result', inputs: ['state'], sharing: 'independent', operator: 'map', domain: 'renderLabel' },
     ],
   });
   const adjustments = [1, 1, -1, 3];

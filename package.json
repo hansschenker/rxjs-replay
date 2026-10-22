@@ -1,7 +1,7 @@
 {
   "name": "@hansschenker/rxjs-replay",
-  "version": "0.1.0",
-  "description": "Record RxJS executions, query captured history, and replay notifications with explicit time and cancellation.",
+  "version": "0.2.0",
+  "description": "Record RxJS executions, explain operator behavior, and replay captured notifications with explicit time and cancellation.",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",

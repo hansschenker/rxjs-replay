@@ -5,3 +5,4 @@ export { parseRecording, serializeRecording } from './serialization.js';
 export { inspectAt } from './history.js';
 export * from './query.js';
 export * from './playback.js';
+export * from './analysis.js';

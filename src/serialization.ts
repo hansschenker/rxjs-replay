@@ -1,5 +1,5 @@
 import { freezeOwned } from './snapshot.js';
-import type { Recording } from './types.js';
+import type { ExecutionMetadata, Recording } from './types.js';
 
 const MAX_TEXT = 32 * 1024 * 1024;
 function fail(path: string, message: string): never { throw new TypeError(`Invalid recording at ${path}: ${message}`); }
@@ -30,7 +30,8 @@ export function parseRecording(json: string): Recording {
   const root = object(parsed, '$');
   keys(root, ['format', 'schemaVersion', 'rxjsVersion', 'name', 'clock', 'streams', 'events', 'capture'], '$');
   member(root.format, ['rxjs-replay'], 'format');
-  member(root.schemaVersion, [1], 'schemaVersion');
+  member(root.schemaVersion, [1, 2], 'schemaVersion');
+  const version2 = root.schemaVersion === 2;
   member(root.rxjsVersion, ['7.8.2'], 'rxjsVersion');
   text(root.name, 'name');
   const clock = object(root.clock, 'clock');
@@ -39,16 +40,19 @@ export function parseRecording(json: string): Recording {
   member(clock.unit, ['ms'], 'clock.unit');
   if (!Array.isArray(root.streams) || root.streams.length > 1_000) fail('streams', 'expected at most 1000 stream definitions');
   const streams = new Set<string>();
+  const operators = new Map<string, string>();
   for (const [index, input] of root.streams.entries()) {
     const path = `streams[${index}]`;
     const stream = object(input, path);
-    keys(stream, ['id', 'label', 'lane', 'inputs', 'sharing'], path);
+    keys(stream, ['id', 'label', 'lane', 'inputs', 'sharing', ...(version2 ? ['operator', 'domain'] : [])], path);
     const id = text(stream.id, `${path}.id`);
     if (streams.has(id)) fail(path, 'duplicate stream id');
     streams.add(id);
     text(stream.label, `${path}.label`);
     member(stream.lane, ['source', 'internal', 'result'], `${path}.lane`);
     if (stream.sharing !== undefined) member(stream.sharing, ['independent', 'shared', 'live'], `${path}.sharing`);
+    if (stream.operator !== undefined) operators.set(id, text(stream.operator, `${path}.operator`));
+    if (stream.domain !== undefined) text(stream.domain, `${path}.domain`);
     if (stream.inputs !== undefined) {
       if (!Array.isArray(stream.inputs) || stream.inputs.length > 1_000 || new Set(stream.inputs).size !== stream.inputs.length) fail(path, 'inputs must be unique stream ids');
       stream.inputs.forEach((id: unknown) => text(id, `${path}.inputs`));
@@ -92,10 +96,18 @@ export function parseRecording(json: string): Recording {
       jsonValue(captured.data, `${path}.data`, 0);
     }
   }
-  type Life = { readonly streamId: string; status: 'active' | 'complete' | 'error' | 'disposed' };
+  type Life = { readonly streamId: string; readonly metadata?: ExecutionMetadata; status: 'active' | 'complete' | 'error' | 'disposed' };
+  type Execution = {
+    readonly streamId: string;
+    readonly metadata: ExecutionMetadata;
+    readonly channels: Set<string>;
+    readonly innerIndexes: Set<number>;
+  };
   const subscriptions = new Map<string, Life>();
+  const executions = new Map<string, Execution>();
   let lastTime = 0;
-  const common = ['seq', 'at', 'streamId', 'subscriptionId', 'causeSeq', 'kind'];
+  const metadataKeys = ['executionId', 'role', 'port', 'ownerExecutionId', 'innerIndex'] as const;
+  const common = ['seq', 'at', 'streamId', 'subscriptionId', 'causeSeq', 'kind', ...(version2 ? metadataKeys : [])];
   for (const [index, input] of root.events.entries()) {
     const path = `events[${index}]`;
     const event = object(input, path);
@@ -107,15 +119,54 @@ export function parseRecording(json: string): Recording {
     if (!streams.has(streamId)) fail(path, 'unknown stream');
     const subscriptionId = text(event.subscriptionId, `${path}.subscriptionId`);
     if (event.causeSeq !== undefined) integer(event.causeSeq, `${path}.causeSeq`, 1, seq - 1);
+    let metadata: ExecutionMetadata | undefined;
+    if (version2) {
+      const executionId = text(event.executionId, `${path}.executionId`);
+      member(event.role, ['boundary', 'operator', 'inner'], `${path}.role`);
+      member(event.port, ['input', 'output'], `${path}.port`);
+      if (event.role !== 'operator' && event.port !== 'output') fail(path, 'only an operator execution can have an input channel');
+      if (event.role === 'operator' && !operators.has(streamId)) fail(path, 'operator execution needs a declared operator policy');
+      if (event.role === 'inner') {
+        text(event.ownerExecutionId, `${path}.ownerExecutionId`);
+        integer(event.innerIndex, `${path}.innerIndex`, 0);
+      } else if (event.ownerExecutionId !== undefined || event.innerIndex !== undefined) {
+        fail(path, 'only inner executions have an owner and inner index');
+      }
+      metadata = {
+        executionId, role: event.role as ExecutionMetadata['role'], port: event.port as ExecutionMetadata['port'],
+        ...(event.ownerExecutionId === undefined ? {} : { ownerExecutionId: event.ownerExecutionId as string }),
+        ...(event.innerIndex === undefined ? {} : { innerIndex: event.innerIndex as number }),
+      };
+    }
     const life = subscriptions.get(subscriptionId);
     if (event.kind === 'subscribe') {
       keys(event, [...common, 'parentSubscriptionId'], path);
       if (life) fail(path, 'subscription id reused');
       if (event.parentSubscriptionId !== undefined && !subscriptions.has(text(event.parentSubscriptionId, `${path}.parentSubscriptionId`))) fail(path, 'unknown parent subscription');
-      subscriptions.set(subscriptionId, { streamId, status: 'active' });
+      if (metadata) {
+        const execution = executions.get(metadata.executionId);
+        if (execution) {
+          if (metadata.role !== 'operator' || execution.metadata.role !== 'operator'
+            || execution.streamId !== streamId || execution.channels.has(metadata.port)) {
+            fail(path, 'execution id reused or channel identity disagrees');
+          }
+          execution.channels.add(metadata.port);
+        } else {
+          if (metadata.port !== 'output') fail(path, 'an execution must begin with its output subscription');
+          if (metadata.role === 'inner') {
+            const owner = executions.get(metadata.ownerExecutionId!);
+            if (!owner || owner.metadata.role !== 'operator' || owner.streamId !== streamId) fail(path, 'inner execution needs an earlier owning operator on the same stream');
+            if (owner.innerIndexes.has(metadata.innerIndex!)) fail(path, 'inner index reused within one operator execution');
+            owner.innerIndexes.add(metadata.innerIndex!);
+          }
+          executions.set(metadata.executionId, { streamId, metadata, channels: new Set([metadata.port]), innerIndexes: new Set() });
+        }
+      }
+      subscriptions.set(subscriptionId, { streamId, ...(metadata === undefined ? {} : { metadata }), status: 'active' });
       continue;
     }
     if (!life || life.streamId !== streamId) fail(path, 'event has no matching subscription');
+    if (metadata && metadataKeys.some(key => metadata[key] !== life.metadata?.[key])) fail(path, 'execution metadata changed within a subscription');
     if (event.kind === 'unsubscribe') {
       keys(event, [...common, 'reason'], path);
       if (life.status === 'disposed') fail(path, 'duplicate disposal');

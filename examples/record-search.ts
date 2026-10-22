@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
-import { VirtualTimeScheduler, map, switchMap, take, timer } from 'rxjs';
-import { createRecorder, evaluateLogpoint, inspectAt, replaySubscription, serializeRecording } from '../src/index.js';
+import { VirtualTimeScheduler, map, take, timer } from 'rxjs';
+import { createRecorder, evaluateLogpoint, getExecutions, getSwitchMapState, inspectAt, replaySubscription, serializeRecording } from '../src/index.js';
 import type { CapturedValue } from '../src/index.js';
 
 const scheduler = new VirtualTimeScheduler();
@@ -9,8 +9,8 @@ const recorder = createRecorder({
   clock: { name: 'virtual', now: () => scheduler.now() },
   streams: [
     { id: 'queries', label: 'queries$', lane: 'source', sharing: 'independent' },
-    { id: 'requests', label: 'request$', lane: 'internal', inputs: ['queries'] },
-    { id: 'results', label: 'results$', lane: 'result', inputs: ['requests'] },
+    { id: 'latest', label: 'Latest result', lane: 'internal', inputs: ['queries'], operator: 'switchMap', domain: 'loadResults$' },
+    { id: 'results', label: 'results$', lane: 'result', inputs: ['latest'] },
   ],
 });
 const queries = ['r', 'rx', 'rxjs'];
@@ -18,7 +18,6 @@ function queryAt(index: number): string { return queries[index]!; }
 function loadResults$(query: string) {
   return timer(9, scheduler).pipe(
     map(() => ({ query, results: [`${query}: result`] })),
-    recorder.trace('requests'),
   );
 }
 function acceptResult(value: unknown): void { console.log('Live result:', value); }
@@ -28,7 +27,7 @@ const results$ = timer(0, 7, scheduler).pipe(
   take(queries.length),
   map(queryAt),
   recorder.trace('queries'),
-  switchMap(loadResults$),
+  recorder.switchMap('latest', loadResults$),
   recorder.trace('results'),
 );
 results$.subscribe(acceptResult);
@@ -37,10 +36,23 @@ const recording = recorder.stop();
 await writeFile('search-recording.json', serializeRecording(recording, 2) + '\n');
 
 const cancellations = evaluateLogpoint(recording, {
-  kinds: ['unsubscribe'], predicate: event => event.kind === 'unsubscribe' && event.reason === 'cancel',
+  role: 'inner', kinds: ['unsubscribe'], predicate: event => event.kind === 'unsubscribe' && event.reason === 'cancel',
 }, event => ({ subscription: event.subscriptionId, at: event.at, causedBy: event.causeSeq }));
 console.log('Recorded cancellation logpoints:', cancellations.map(hit => hit.result));
 console.log('Subscriptions:', inspectAt(recording).subscriptions.map(({ id, streamId, outcome }) => ({ id, streamId, outcome })));
+
+const operator = getExecutions(recording).find(execution => execution.role === 'operator')!;
+const inputComplete = recording.events.find(event => event.executionId === operator.id && event.port === 'input' && event.kind === 'complete')!;
+console.log('After outer completion:', getSwitchMapState(recording, operator.id, inputComplete.seq));
+console.log('After output completion:', getSwitchMapState(recording, operator.id));
+
+// Output has its own channel: outer completion must not truncate its replay.
+const outputClock = new VirtualTimeScheduler();
+replaySubscription(recording, operator.outputSubscriptionId!, { scheduler: outputClock }).subscribe({
+  next: value => console.log(`Operator output replay at ${outputClock.now()} ms:`, value),
+  complete: () => console.log(`Operator output replay completed at ${outputClock.now()} ms`),
+});
+outputClock.flush();
 
 // A new scheduler delivers captured source packages for a regression scenario.
 // This does not call loadResults$ or repeat the original recording's effects.

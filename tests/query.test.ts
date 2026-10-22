@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { of } from 'rxjs';
+import { createRecorder } from '../src/recorder.js';
 import { evaluateLogpoint, selectEvents } from '../src/query.js';
 import type { Recording, TraceEvent } from '../src/types.js';
 
@@ -17,6 +19,20 @@ const recording: Recording = {
 };
 
 describe('saved-history queries', () => {
+  it('selects operator channels and explicitly owned inners independently', () => {
+    const recorder = createRecorder({ streams: [{ id: 'latest', label: 'Latest', lane: 'internal', operator: 'switchMap' }] });
+    of(1, 2).pipe(recorder.switchMap('latest', value => of(value * 10))).subscribe();
+    const saved = recorder.getRecording();
+    const operator = saved.events.find(event => event.role === 'operator')!;
+    const input = selectEvents(saved, { executionId: operator.executionId, role: 'operator', port: 'input', kinds: ['next'] });
+    const output = selectEvents(saved, { executionId: operator.executionId, port: 'output', kinds: ['next'] });
+    const inners = selectEvents(saved, { ownerExecutionId: operator.executionId, role: 'inner', kinds: ['next'] });
+    expect(input.map(event => event.kind === 'next' && event.value.status === 'captured' ? event.value.data : null)).toEqual([1, 2]);
+    expect(output.map(event => event.kind === 'next' && event.value.status === 'captured' ? event.value.data : null)).toEqual([10, 20]);
+    expect(inners.map(event => event.innerIndex)).toEqual([0, 1]);
+    expect(new Set([...input, ...output].map(event => event.subscriptionId)).size).toBe(2);
+    expect(selectEvents(recording, { role: 'operator' })).toEqual([]);
+  });
   it('combines inclusive filters while preserving same-time delivery order', () => {
     const result = selectEvents(recording, { streamId: 'queries', subscriptionId: 's1', kinds: ['next'], fromTime: 10, toTime: 10, fromSeq: 2, toSeq: 3 });
     expect(result.map(event => event.seq)).toEqual([2, 3]);

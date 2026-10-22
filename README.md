@@ -1,10 +1,12 @@
 # rxjs-replay
 
-**Record an RxJS execution, inspect what happened, and replay its captured notifications with explicit time and cancellation.**
+**Record an RxJS execution, explain its operator behavior, and replay captured notifications with explicit time and cancellation.**
 
 `rxjs-replay` is a TypeScript library for **RxJS 7.8.2**. Place a `trace()` operator at the stream boundaries you want to observe. After the application runs, inspect the recording, move through it, ask new questions about captured values, or use recorded inputs in a regression test.
 
-The implementation uses functions and closures. The core runs without a DOM; an optional browser viewer displays four aligned lanes.
+The implementation uses functions and closures. The core runs without a DOM; an optional browser viewer links a selectable dataflow graph, four aligned lanes, operator explanations, and grouped subscription lifetimes.
+
+**New in 0.2:** instrumented `switchMap`, separate input/output channels grouped by execution, pure operator analysis, and synchronized graph/lifetime navigation. New recordings use schema version 2. Existing version 1 recordings still open and replay unchanged.
 
 ![The rxjs-replay viewer showing a recorded search, ordered events, captured values, and subscription cancellation](docs/images/viewer.png)
 
@@ -41,11 +43,12 @@ For repeatable builds, append `#<commit-sha>` to the GitHub dependency. Import t
 | --- | --- |
 | Record | Observe explicitly instrumented notifications, subscription lifetimes, and supplied state snapshots. |
 | Inspect | Reconstruct what the retained history shows at a particular event. |
+| Explain | Inspect supported `switchMap` state and event explanations derived from recorded facts. |
 | Navigate | Seek, step, play, pause, and change playback speed over recorded history. |
 | Query | Filter recorded events and evaluate new projections over their captured data. |
 | Replay events | Deliver trace records as a cold Observable. |
 | Replay a subscription | Deliver captured `next`, `error`, completion, and cancellation behavior on a supplied scheduler. |
-| View | Explore time, source emissions, internal behavior, and resulting emissions in a browser. |
+| View | Link declared graph stages, operator executions, inner lifetimes, and the four-lane timeline. |
 
 The recording contains detached data from selected stream boundaries. It does not contain the browser VM, arbitrary local variables, or unrecorded application state. Navigation and historical queries do not subscribe to the original application or repeat its effects.
 
@@ -106,6 +109,58 @@ The application pattern **`scan` + `shareReplay({ bufferSize: 1, refCount: true 
 
 `captureState` does not expose RxJS private operator state. Domain meaning stays in your named functions; operators determine how packages move over time.
 
+## Explain an operator execution
+
+When a new query arrives, `switchMap` replaces its previous inner subscription. When the query source completes, the output waits for any remaining inner execution. `recorder.switchMap()` observes that behavior by delegating to RxJS 7.8.2's real operator. Your named function still provides the domain operation.
+
+Declare the operator and domain function, then use the adapter in the dataflow:
+
+```ts
+import { Subject, type Observable } from 'rxjs';
+import { createRecorder, getExecutions, getSwitchMapState } from '@hansschenker/rxjs-replay';
+
+interface SearchResult { readonly query: string; readonly title: string }
+declare function loadResult$(query: string): Observable<SearchResult>;
+declare function renderResult(result: SearchResult): void;
+
+const recorder = createRecorder({
+  name: 'Latest search',
+  streams: [
+    { id: 'queries', label: 'queries$', lane: 'source', sharing: 'live' },
+    {
+      id: 'latest', label: 'Latest result', lane: 'internal', inputs: ['queries'],
+      operator: 'switchMap', domain: 'loadResult$',
+    },
+    { id: 'results', label: 'results$', lane: 'result', inputs: ['latest'] },
+  ],
+});
+const queries$ = new Subject<string>(); // Explicit live input.
+const results$ = queries$.pipe(
+  recorder.trace<string>('queries'),
+  recorder.switchMap('latest', loadResult$),
+  recorder.trace<SearchResult>('results'),
+);
+
+// The application owns execution and disposal.
+const subscription = results$.subscribe({ next: renderResult });
+queries$.next('rxjs');
+queries$.next('rxjs cancellation');
+queries$.complete();
+
+const recording = recorder.getRecording();
+const operator = getExecutions(recording).find(item => item.role === 'operator');
+if (operator) console.log(getSwitchMapState(recording, operator.id));
+
+// At the application's normal disposal boundary:
+subscription.unsubscribe();
+```
+
+Every operator execution has an `executionId`. Its input and output use **different `subscriptionId` values**, so an input completion cannot prematurely complete output replay. Each inner has its own execution and subscription, an `ownerExecutionId`, and its original projection `innerIndex`. Ordinary `parentSubscriptionId` still means observed synchronous nesting; it is not operator ownership.
+
+Use `getExecutions(recording, seq?)` for cursor-scoped groups, `getSwitchMapState(recording, executionId, seq?)` for the supported operator model, and `explainEvent(recording, event)` for an event description. Results distinguish **recorded evidence**, **reconstructed explanations**, and **unavailable state**. Reentrant overlap beyond the supported single-active-inner model is unavailable; its actual events remain inspectable. Terminal notifications and the later observed disposal are kept separate.
+
+The adapter stays lazy, adds no application subscription or sharing, and preserves live value/error identity. A plain `trace()` on a stage labelled `switchMap` remains a boundary probe; labels alone do not create operator observations. See [Operator inspection](docs/OPERATOR_INSPECTION.md) for the model, cursor semantics, and examples.
+
 ## Time, cancellation, and sharing
 
 **Time comes from a clock.** The default recorder clock uses `performance.now()`. Recorded `at` values are nonnegative milliseconds relative to recorder creation. Supply a virtual clock when capturing a deterministic scenario:
@@ -151,7 +206,7 @@ const logpoints = evaluateLogpoint(
 );
 ```
 
-`selectEvents()` supports stream, subscription, event-kind, sequence-range, and time-range filters. `inspectAt()` reconstructs the subscriptions, counts, and latest captured values/state visible through a cursor position. Cursor `0` means before the first event.
+`selectEvents()` supports stream, subscription, execution, owner, role, port, event-kind, sequence-range, and time-range filters. `inspectAt()` reconstructs the subscriptions, counts, and latest captured values/state visible through a cursor position. Cursor `0` means before the first event.
 
 A retrospective logpoint applies a user function to captured events. Each result contains its source event and either a successful value or an error description. Keep these functions pure. They cannot read local variables that were never captured, and they do not execute inside a historical JavaScript frame.
 
@@ -261,9 +316,9 @@ viewer.setRecording(anotherRecording);
 viewer.destroy();
 ```
 
-The aligned lanes are **Timeline**, **Source emissions**, **Internal behavior**, and **Resulting emissions**. The viewer also exposes selected-event details, captured values/state, synchronous cause links, and subscription lifetime/outcome information.
+The aligned lanes are **Timeline**, **Source emissions**, **Internal behavior**, and **Resulting emissions**. A selectable graph shows declared connections and separate operator/domain labels. The event panel distinguishes captured facts from reconstructed operator explanations, with links to the supporting events. Grouped lifetimes expose separate input/output channels and owned inners at the current cursor.
 
-Controls include play/pause, stepping, beginning/end navigation, position and speed controls, stream/notification filters, and JSON import/export. Imported data is rendered as text. Large recordings use bounded event lists to keep the display usable.
+Controls include play/pause, stepping, beginning/end navigation, position and speed controls, stage/subscription/notification filters, and JSON import/export. Stage, execution, inner, and cause selections coordinate with the same cursor. Imported data is rendered as text. Large recordings use bounded event lists to keep the display usable.
 
 ## Save, import, and bound capture
 
@@ -274,7 +329,7 @@ const json = serializeRecording(recording, 2);
 const imported = parseRecording(json);
 ```
 
-Imports are validated and deeply frozen. Export validates the recording as well. `captureSnapshot(value, projection?)` is also exported when a caller needs the same detached value representation outside `trace()`. The schema is versioned; see [Trace format](docs/TRACE_FORMAT.md).
+Imports are validated and deeply frozen. Export validates the recording as well. `parseRecording()` accepts Replay schema versions 1 and 2; version 1 stays unchanged and its operator explanations are unavailable because that evidence was not recorded. New recorders emit version 2. `captureSnapshot(value, projection?)` is also exported when a caller needs the same detached value representation outside `trace()`. See [Trace format](docs/TRACE_FORMAT.md).
 
 `maxEvents` defaults to **50,000**, with a maximum of **250,000**. Once the limit is reached, the recorder retains the original prefix and counts omitted suffix events in `capture.droppedEvents`. It does not rotate the buffer or overwrite the beginning. `capture.totalEvents` counts observed events while capture was active, including those omitted from storage.
 
@@ -288,6 +343,7 @@ The snapshotter avoids ordinary getters and `toJSON`, and bounds depth, entries,
 
 - [Architecture and the Input Controller / Action Policy model](docs/ARCHITECTURE.md)
 - [Trace format, ordering, and lifecycle semantics](docs/TRACE_FORMAT.md)
+- [Operator inspection, supported explanations, and linked navigation](docs/OPERATOR_INSPECTION.md)
 - [Replay source inspiration and the boundaries of this implementation](docs/INSPIRATION.md)
 - [Roadmap](docs/ROADMAP.md)
 

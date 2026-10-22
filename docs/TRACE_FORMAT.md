@@ -1,4 +1,4 @@
-# Trace format — schema version 1
+# Trace format — schema version 2, with version 1 compatibility
 
 A recording is immutable JSON-safe evidence from explicitly instrumented RxJS 7.8.2 stream boundaries. The schema distinguishes event order, time, notification delivery, subscription disposal, and captured domain state.
 
@@ -7,7 +7,7 @@ A recording is immutable JSON-safe evidence from explicitly instrumented RxJS 7.
 | Field | Meaning |
 | --- | --- |
 | `format` | Literal `"rxjs-replay"`. |
-| `schemaVersion` | Literal `1`. |
+| `schemaVersion` | New recordings use `2`; imported version `1` recordings remain version `1`. |
 | `rxjsVersion` | Literal `"7.8.2"`. |
 | `name` | Human-readable recording name. |
 | `clock.name` | Clock identifier such as `performance` or an application-supplied name. |
@@ -21,6 +21,8 @@ A recording is immutable JSON-safe evidence from explicitly instrumented RxJS 7.
 Every stream has an `id`, `label`, and `lane` (`source`, `internal`, or `result`). Optional `inputs` list declared upstream stream IDs. Optional `sharing` is `independent`, `shared`, or `live`.
 
 These declarations describe the author's dataflow. A `shared` label does not insert `share()`, and edges do not prove that one particular event caused another.
+
+Version 2 also permits `operator` and `domain` labels. `operator` identifies the declared dataflow policy, such as `switchMap`; `domain` names the application function, such as `loadResult$`. These labels are display metadata. Only an instrumented adapter records the corresponding operator structure.
 
 ### Capture metadata
 
@@ -65,6 +67,32 @@ Each traced boundary has its own subscription identifiers. A pipeline with sever
 
 `parentSubscriptionId` represents observed subscription nesting when available. Stream topology and subscription nesting answer different questions.
 
+### Version 2 execution metadata
+
+Every version 2 event has the following metadata, unchanged throughout one subscription:
+
+| Field | Meaning |
+| --- | --- |
+| `executionId` | Identity of one boundary, operator, or inner execution. |
+| `role` | `boundary`, `operator`, or `inner`. |
+| `port` | `input` or `output`; only operator executions have an input channel. |
+| `ownerExecutionId` | Required for an inner: the explicitly observed owning operator execution. |
+| `innerIndex` | Required for an inner: the nonnegative projection index supplied by RxJS. |
+
+Each execution begins with its output subscription. A boundary or inner execution has one output channel. An operator may also have one input channel. **Input and output have separate subscription IDs but the same execution ID.** Each channel retains the ordinary notification protocol independently. Completion of an operator input does not complete its output channel.
+
+An inner has its own execution and output subscription. Its owner must be an earlier operator execution on the same declared stream. Inner indexes are unique within an owner; their start order need not be numeric order because a domain projector can reenter the outer input. The format preserves observed overlap rather than enforcing the explanation model's single-active-inner assumption.
+
+`ownerExecutionId` and `parentSubscriptionId` are distinct: the former is operator ownership, the latter is observed synchronous subscription nesting. `causeSeq` is the observed event context. Neither graph edges nor equal values create one of these relationships.
+
+The importer validates role/port combinations, channel uniqueness, ownership, inner indexes, metadata consistency, and each subscription's notification/disposal protocol. A retained prefix can end between output subscription and input subscription, or before an inner starts. Import does not invent those missing observations.
+
+### Existing version 1 recordings
+
+Version 1 has no execution metadata or operator/domain labels. `parseRecording()` validates it under the original schema and returns it unchanged and deeply frozen. Re-export retains version 1. Boundary inspection, queries, viewer navigation, and notification replay continue to work.
+
+`getExecutions()` can present a version 1 subscription as a boundary group using its subscription ID for display. This is a derived view; the stored events are not rewritten. Operator state remains unavailable because version 1 did not capture the required operator observations. These are Replay version 1 recordings, not the different Inspector JSON format.
+
 ### Terminal notifications and disposal
 
 A normal completed subscription has a completion notification and a disposal event. An errored subscription has an error notification and a disposal event. Explicit cancellation can have a disposal event without a completion notification.
@@ -101,7 +129,7 @@ This example records one value and a normal ending at one boundary:
 ```json
 {
   "format": "rxjs-replay",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "rxjsVersion": "7.8.2",
   "name": "One number",
   "clock": { "name": "virtual", "unit": "ms" },
@@ -109,10 +137,10 @@ This example records one value and a normal ending at one boundary:
     { "id": "input", "label": "Input", "lane": "source", "sharing": "independent" }
   ],
   "events": [
-    { "seq": 1, "at": 0, "streamId": "input", "subscriptionId": "sub-1", "kind": "subscribe" },
-    { "seq": 2, "at": 10, "streamId": "input", "subscriptionId": "sub-1", "kind": "next", "value": { "status": "captured", "data": 7 } },
-    { "seq": 3, "at": 20, "streamId": "input", "subscriptionId": "sub-1", "kind": "complete" },
-    { "seq": 4, "at": 20, "streamId": "input", "subscriptionId": "sub-1", "kind": "unsubscribe", "reason": "complete" }
+    { "seq": 1, "at": 0, "streamId": "input", "subscriptionId": "sub-1", "executionId": "exec-1", "role": "boundary", "port": "output", "kind": "subscribe" },
+    { "seq": 2, "at": 10, "streamId": "input", "subscriptionId": "sub-1", "executionId": "exec-1", "role": "boundary", "port": "output", "kind": "next", "value": { "status": "captured", "data": 7 } },
+    { "seq": 3, "at": 20, "streamId": "input", "subscriptionId": "sub-1", "executionId": "exec-1", "role": "boundary", "port": "output", "kind": "complete" },
+    { "seq": 4, "at": 20, "streamId": "input", "subscriptionId": "sub-1", "executionId": "exec-1", "role": "boundary", "port": "output", "kind": "unsubscribe", "reason": "complete" }
   ],
   "capture": {
     "maxEvents": 50000,
@@ -138,7 +166,7 @@ Historical views interpret what has been observed through the chosen cursor. The
 
 - `serializeRecording(recording, space?)` validates and returns JSON text.
 - `parseRecording(text)` validates the versioned envelope, event structure, and protocol relationships, then returns a deeply frozen recording.
-- Import rejects unsupported/malformed data; it does not execute captured content.
+- Import accepts Replay schema 1 and 2 and rejects unsupported/malformed data; it does not execute captured content.
 - A viewer renders imported payloads as text.
 
 JSON input and export are limited to 32 Mi characters. Parsed snapshot data is also bounded by a 16-level depth limit and a total budget of 2,000,000 JSON nodes. The browser picker limits files to 20 MiB. Capture uses smaller per-value budgets: 8 levels, 64 entries per collection, 1,000 nodes, and 4,096-character string previews. Reaching a capture budget marks that snapshot `truncated`; exceeding an import/export bound reports an error.
@@ -150,5 +178,7 @@ The declared schema version is the compatibility boundary. Do not infer support 
 `replayEvents` delivers the retained trace as data and completes at its retained end. A trace `error` event does not error this inspection stream.
 
 `replaySubscription` delivers one subscription's captured notifications on a supplied scheduler, relative to that subscription's recorded `subscribe.at`. It interprets explicit cancellation as connection closure without completion. If no ending was observed, it remains open after the retained notifications.
+
+For an operator, select its `outputSubscriptionId` from `getExecutions()` to replay results, or its `inputSubscriptionId` to replay the observed outer input. Passing an execution ID in place of a subscription ID is not channel selection. Inner subscription IDs replay only that captured inner. Operator input completion cannot terminate output replay because these are separate channels.
 
 Neither operation recreates the original application. Re-execution of a pipeline, its dependencies, or its effects requires a separate explicit application/test setup.

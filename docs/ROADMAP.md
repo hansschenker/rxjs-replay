@@ -17,6 +17,18 @@ The project targets RxJS **7.8.2**. The central contract is explicit boundary re
 
 This list describes the initial scope. The repository's executable checks establish behavior; a roadmap entry is not a guarantee about untested environments or arbitrary RxJS internals.
 
+## Implemented in 0.2: operator-aware inspection
+
+- Schema version 2 execution roles, input/output channels, and explicit inner ownership.
+- Distinct subscription IDs for operator input and output, preserving independent notification replay.
+- Instrumented `switchMap` delegated to RxJS 7.8.2, with ordinary projection/conversion timing and synchronous disposal.
+- Pure `getExecutions`, `getSwitchMapState`, and `explainEvent` APIs with cursor-scoped evidence.
+- Reconstructed/unavailable provenance; unsupported reentrant overlap stays visible as recorded facts.
+- Declared dataflow graph with operator and domain-function labels, synchronized with the four lanes.
+- Grouped execution lifetimes and linked stage, channel, inner, and causal navigation.
+- Version 1 Replay recordings still validate, open, and replay unchanged; no invented operator metadata.
+- A runnable instrumented search showing cancellation and output waiting after input completion.
+
 ## Candidate next work
 
 ### Recording-driven regression workflows
@@ -27,9 +39,13 @@ Generated expectations should remain reviewable: a captured bug is evidence of w
 
 ### Integration with other RxJS tools
 
-Investigate adapters for `rxjs-inspector` and related execution-viewer tooling. First compare their event and ownership semantics; do not assume that similar event names imply schema compatibility.
+The operator-aware features inspired by `rxjs-inspector` are integrated in Replay's own recording/analysis/viewer layers. Importing Inspector's JSON remains separate future work: its suffix retention and lifecycle semantics differ from Replay's. Do not assume that similar event names imply schema compatibility.
 
 Adapters should preserve record identity, lifecycle distinctions, clock information, and loss metadata. Importing a recording must remain a data operation.
+
+### More operator models
+
+Build explicit adapters and supported explanation models for `mergeMap`, `concatMap`, and `exhaustMap`, then selected state/termination operators. Expose overlap, queues, or ignored inputs only when the corresponding adapter actually records the required evidence. Each model needs a clear unavailable state and behavior checks against RxJS 7.8.2. Declaring an operator name alone never enables its model.
 
 ### Analysis reports
 

@@ -31,6 +31,10 @@ export function selectEvents(recording: Recording, query: EventQuery = {}): read
   return Object.freeze(recording.events.filter(event => (
     (query.streamId === undefined || event.streamId === query.streamId)
     && (query.subscriptionId === undefined || event.subscriptionId === query.subscriptionId)
+    && (query.executionId === undefined || event.executionId === query.executionId)
+    && (query.ownerExecutionId === undefined || event.ownerExecutionId === query.ownerExecutionId)
+    && (query.role === undefined || event.role === query.role)
+    && (query.port === undefined || event.port === query.port)
     && (query.kinds === undefined || query.kinds.includes(event.kind))
     && (query.fromSeq === undefined || event.seq >= query.fromSeq)
     && (query.toSeq === undefined || event.seq <= query.toSeq)

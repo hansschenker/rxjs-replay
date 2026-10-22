@@ -1,9 +1,10 @@
-import { Observable, Subscriber } from 'rxjs';
-import type { MonoTypeOperatorFunction } from 'rxjs';
+import { Observable, Subscriber, from, switchMap as rxSwitchMap } from 'rxjs';
+import type { MonoTypeOperatorFunction, ObservableInput, ObservedValueOf, OperatorFunction } from 'rxjs';
 import { captureSnapshot, freezeOwned } from './snapshot.js';
-import type { EventBase, Recorder, RecorderOptions, Recording, StreamDefinition, TraceEvent, TraceOptions } from './types.js';
+import type { CurrentRecording, EventBase, ExecutionMetadata, ExecutionPort, RecordedTraceEvent, Recorder, RecorderOptions, StreamDefinition, TraceEvent, TraceOptions } from './types.js';
 
 type EventDetails = TraceEvent extends infer E ? E extends EventBase ? Omit<E, keyof EventBase> : never : never;
+type Execution = Omit<ExecutionMetadata, 'port'> & { readonly streamId: string };
 
 export function createRecorder(options: RecorderOptions): Recorder {
   const maxEvents = options.maxEvents ?? 50_000;
@@ -19,11 +20,15 @@ export function createRecorder(options: RecorderOptions): Recorder {
     if (!validId(stream.id) || !validId(stream.label) || ids.has(stream.id)) throw new TypeError('Each stream needs a unique id and nonempty label (at most 256 characters).');
     if (!['source', 'internal', 'result'].includes(stream.lane)) throw new TypeError(`Invalid lane for ${stream.id}.`);
     if (stream.sharing !== undefined && !['independent', 'shared', 'live'].includes(stream.sharing)) throw new TypeError('Invalid declared sharing policy.');
+    if (stream.operator !== undefined && !validId(stream.operator)) throw new TypeError('operator must be nonempty and at most 256 characters.');
+    if (stream.domain !== undefined && !validId(stream.domain)) throw new TypeError('domain must be nonempty and at most 256 characters.');
     if (stream.inputs !== undefined && (!Array.isArray(stream.inputs) || !stream.inputs.every(validId) || new Set(stream.inputs).size !== stream.inputs.length)) throw new TypeError('inputs must contain unique stream ids.');
     ids.add(stream.id);
     return { id: stream.id, label: stream.label, lane: stream.lane,
       ...(stream.inputs ? { inputs: [...stream.inputs] } : {}),
       ...(stream.sharing ? { sharing: stream.sharing } : {}),
+      ...(stream.operator === undefined ? {} : { operator: stream.operator }),
+      ...(stream.domain === undefined ? {} : { domain: stream.domain }),
     };
   }));
   for (const stream of streams) for (const input of stream.inputs ?? []) {
@@ -50,18 +55,19 @@ export function createRecorder(options: RecorderOptions): Recorder {
   }
   readTime();
 
-  const events: TraceEvent[] = [];
+  const events: RecordedTraceEvent[] = [];
   let totalEvents = 0;
   let subscriptionCount = 0;
+  let executionCount = 0;
   let stopped = false;
   let context: { readonly seq: number; readonly subscriptionId: string } | undefined;
-  function record(streamId: string, subscriptionId: string, details: () => EventDetails): number | undefined {
+  function record(execution: Execution, subscriptionId: string, port: ExecutionPort, details: () => EventDetails): number | undefined {
     if (stopped) return undefined;
     const seq = ++totalEvents;
     if (events.length >= maxEvents) return undefined;
-    const event = freezeOwned({ seq, at: readTime(), streamId, subscriptionId,
+    const event = freezeOwned({ seq, at: readTime(), ...execution, subscriptionId, port,
       ...(context ? { causeSeq: context.seq } : {}), ...details(),
-    }) as TraceEvent;
+    }) as RecordedTraceEvent;
     events.push(event);
     return seq;
   }
@@ -70,6 +76,48 @@ export function createRecorder(options: RecorderOptions): Recorder {
     context = seq === undefined ? undefined : { seq, subscriptionId };
     try { forward(); } finally { context = previous; }
   }
+  function beginExecution(streamId: string, role: Execution['role'], ownerExecutionId?: string, innerIndex?: number): Execution {
+    return { streamId, executionId: `e${++executionCount}`, role,
+      ...(ownerExecutionId === undefined ? {} : { ownerExecutionId }),
+      ...(innerIndex === undefined ? {} : { innerIndex }),
+    };
+  }
+
+  /** One subscription ID always denotes one notification channel, including operator input/output. */
+  function forward<T>(source: Observable<T>, destination: Subscriber<T>, execution: Execution, port: ExecutionPort, traceOptions: TraceOptions<T> = {}): void {
+    if (destination.closed) {
+      // RxJS can subscribe a closed inner after reentrant projection. Preserve source setup/teardown.
+      source.subscribe(destination);
+      return;
+    }
+    const subscriptionId = `s${++subscriptionCount}`;
+    const parentSubscriptionId = context?.subscriptionId;
+    record(execution, subscriptionId, port, () => ({ kind: 'subscribe', ...(parentSubscriptionId ? { parentSubscriptionId } : {}) }));
+    let outcome: 'cancel' | 'complete' | 'error' = 'cancel';
+    const forwarding = new Subscriber<T>({
+      next(value) {
+        const seq = record(execution, subscriptionId, port, () => ({ kind: 'next', value: captureSnapshot(value, captureValue) }));
+        if (traceOptions.captureState) deliver(seq, subscriptionId, () => {
+          record(execution, subscriptionId, port, () => ({ kind: 'state', label: traceOptions.stateLabel ?? 'captured state', state: captureSnapshot(value, input => traceOptions.captureState!(input as T)) }));
+        });
+        deliver(seq, subscriptionId, () => destination.next(value));
+      },
+      error(error: unknown) {
+        outcome = 'error';
+        const seq = record(execution, subscriptionId, port, () => ({ kind: 'error', error: captureSnapshot(error, captureValue) }));
+        deliver(seq, subscriptionId, () => destination.error(error));
+      },
+      complete() {
+        outcome = 'complete';
+        const seq = record(execution, subscriptionId, port, () => ({ kind: 'complete' }));
+        deliver(seq, subscriptionId, () => destination.complete());
+      },
+    });
+    // Wire disposal before upstream starts, including synchronous sources and take(1).
+    destination.add(forwarding);
+    forwarding.add(() => { record(execution, subscriptionId, port, () => ({ kind: 'unsubscribe', reason: outcome })); });
+    if (!forwarding.closed) source.subscribe(forwarding);
+  }
   function trace<T>(streamId: string, traceOptions: TraceOptions<T> = {}): MonoTypeOperatorFunction<T> {
     if (!ids.has(streamId)) throw new TypeError(`Unknown stream: ${streamId}. Declare it in createRecorder({ streams }).`);
     const captureState = traceOptions.captureState;
@@ -77,41 +125,38 @@ export function createRecorder(options: RecorderOptions): Recorder {
     if (captureState !== undefined && typeof captureState !== 'function') throw new TypeError('captureState must be a function.');
     if (!validId(stateLabel)) throw new TypeError('stateLabel must be nonempty and at most 256 characters.');
     return source => new Observable<T>(destination => {
-      if (destination.closed) return;
-      const subscriptionId = `s${++subscriptionCount}`;
-      const parentSubscriptionId = context?.subscriptionId;
-      record(streamId, subscriptionId, () => ({ kind: 'subscribe', ...(parentSubscriptionId ? { parentSubscriptionId } : {}) }));
-      let outcome: 'cancel' | 'complete' | 'error' = 'cancel';
-      const forwarding = new Subscriber<T>({
-        next(value) {
-          const seq = record(streamId, subscriptionId, () => ({ kind: 'next', value: captureSnapshot(value, captureValue) }));
-          if (captureState) deliver(seq, subscriptionId, () => {
-            record(streamId, subscriptionId, () => ({ kind: 'state', label: stateLabel, state: captureSnapshot(value, input => captureState(input as T)) }));
-          });
-          deliver(seq, subscriptionId, () => destination.next(value));
-        },
-        error(error: unknown) {
-          outcome = 'error';
-          const seq = record(streamId, subscriptionId, () => ({ kind: 'error', error: captureSnapshot(error, captureValue) }));
-          deliver(seq, subscriptionId, () => destination.error(error));
-        },
-        complete() {
-          outcome = 'complete';
-          const seq = record(streamId, subscriptionId, () => ({ kind: 'complete' }));
-          deliver(seq, subscriptionId, () => destination.complete());
-        },
+      if (destination.closed) { source.subscribe(destination); return; }
+      forward(source, destination, beginExecution(streamId, 'boundary'), 'output', {
+        ...(captureState === undefined ? {} : { captureState }), stateLabel,
       });
-      // Wire disposal before upstream starts, including for synchronous sources and take(1).
-      destination.add(forwarding);
-      forwarding.add(() => { record(streamId, subscriptionId, () => ({ kind: 'unsubscribe', reason: outcome })); });
-      if (!forwarding.closed) source.subscribe(forwarding);
     });
   }
-  function getRecording(): Recording {
-    return freezeOwned({ format: 'rxjs-replay', schemaVersion: 1, rxjsVersion: '7.8.2', name,
+  function traceSwitchMap<T, O extends ObservableInput<unknown>>(streamId: string, project: (value: T, index: number) => O): OperatorFunction<T, ObservedValueOf<O>> {
+    type R = ObservedValueOf<O>;
+    if (!ids.has(streamId)) throw new TypeError(`Unknown stream: ${streamId}. Declare it in createRecorder({ streams }).`);
+    if (streams.find(stream => stream.id === streamId)?.operator !== 'switchMap') throw new TypeError('An instrumented switchMap requires a stream declared with operator: "switchMap".');
+    if (typeof project !== 'function') throw new TypeError('switchMap project must be a function.');
+    return source => new Observable<R>(destination => {
+      if (destination.closed) { source.pipe(rxSwitchMap(project)).subscribe(destination); return; }
+      const execution = beginExecution(streamId, 'operator');
+      const input = new Observable<T>(inputDestination => forward(source, inputDestination, execution, 'input'));
+      function projectInner(value: T, index: number): Observable<R> {
+        // Preserve RxJS's projection and conversion point, including reentrant completion/errors.
+        const observable = from(project(value, index));
+        return new Observable<R>(innerDestination => {
+          if (innerDestination.closed) { observable.subscribe(innerDestination); return; }
+          const inner = beginExecution(streamId, 'inner', execution.executionId, index);
+          forward(observable, innerDestination, inner, 'output');
+        });
+      }
+      forward(input.pipe(rxSwitchMap(projectInner)), destination, execution, 'output');
+    });
+  }
+  function getRecording(): CurrentRecording {
+    return freezeOwned({ format: 'rxjs-replay', schemaVersion: 2, rxjsVersion: '7.8.2', name,
       clock: { name: clockName, unit: 'ms' }, streams, events: [...events],
       capture: { maxEvents, totalEvents, droppedEvents: totalEvents - events.length, clockErrors, stopped },
     });
   }
-  return Object.freeze({ trace, getRecording, stop: () => { stopped = true; return getRecording(); } });
+  return Object.freeze({ trace, switchMap: traceSwitchMap, getRecording, stop: () => { stopped = true; return getRecording(); } });
 }

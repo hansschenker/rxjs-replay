@@ -35,6 +35,11 @@ export function inspectAt(recording: Recording, seq = recording.events.at(-1)?.s
         start: event,
         outcome: 'active',
         values: 0,
+        ...(event.executionId === undefined ? {} : { executionId: event.executionId }),
+        ...(event.role === undefined ? {} : { role: event.role }),
+        ...(event.port === undefined ? {} : { port: event.port }),
+        ...(event.ownerExecutionId === undefined ? {} : { ownerExecutionId: event.ownerExecutionId }),
+        ...(event.innerIndex === undefined ? {} : { innerIndex: event.innerIndex }),
         ...(event.parentSubscriptionId === undefined ? {} : { parentSubscriptionId: event.parentSubscriptionId }),
       });
       continue;

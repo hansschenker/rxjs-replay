@@ -57,6 +57,14 @@ Replay's [`HitPointsCache.ts`](https://github.com/replayio/devtools/blob/105893b
 
 The [`react-mount-detection/main.ts`](https://github.com/replayio/Protocol-Examples/blob/eea97786e4ed89dafa8237ceaf8bff0d72673a9c/react-mount-detection/main.ts) example explicitly notes that its older `Analysis` API was removed, identifying `Session.findPoints` and `Session.runEvaluation` as replacements. It is useful design history, not evidence that the old example runs unchanged today.
 
+## Operator inspection from rxjs-inspector
+
+Version 0.2 integrates ideas and analysis patterns from [rxjs-inspector at 46986f6](https://github.com/hansschenker/rxjs-inspector/tree/46986f6d52d71b7d96def77b6a6ac061f7809338): instrumented real `switchMap`, operator/domain graph labels, explicitly owned inner executions, bounded state reconstruction, and linked lifetimes. Its [recorder](https://github.com/hansschenker/rxjs-inspector/blob/46986f6d52d71b7d96def77b6a6ac061f7809338/src/recorder.ts) and [analysis](https://github.com/hansschenker/rxjs-inspector/blob/46986f6d52d71b7d96def77b6a6ac061f7809338/src/analysis.ts) informed the implementation.
+
+Replay adapts those ideas to its existing notification replay contract: operator input and output have independent subscription identities, grouped by an execution identity, and actual disposal remains a separate observation. Its bounded prefix retention is unchanged. Inspector JSON import is still future work, and version 1 compatibility refers specifically to Replay's own prior format.
+
+The adapter delegates to the [RxJS 7.8.2 switchMap implementation](https://github.com/ReactiveX/rxjs/blob/7.8.2/src/internal/operators/switchMap.ts). Direct parity tests cover projection/conversion timing, synchronous disposal, reentrant overlap, and closed-subscriber source setup/teardown. The explanation model reports unavailable when observed behavior exceeds the model; it does not alter the underlying RxJS policy.
+
 ## What this library promises
 
 `rxjs-replay` records explicitly instrumented Observable boundaries and replays their captured notifications. It supports historical inspection and scheduled playback of that trace. It does not record or restore the browser VM, capture uninstrumented execution, or reproduce external effects automatically.

@@ -1,10 +1,12 @@
-import type { MonoTypeOperatorFunction, Observable, SchedulerLike } from 'rxjs';
+import type { MonoTypeOperatorFunction, Observable, ObservableInput, ObservedValueOf, OperatorFunction, SchedulerLike } from 'rxjs';
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 export type CapturedValue =
   | { readonly status: 'captured' | 'truncated'; readonly data: JsonValue }
   | { readonly status: 'unavailable'; readonly reason: string };
 export type Lane = 'source' | 'internal' | 'result';
+export type ExecutionRole = 'boundary' | 'operator' | 'inner';
+export type ExecutionPort = 'input' | 'output';
 
 /** Graph and sharing metadata is declared by the application, never guessed from values. */
 export interface StreamDefinition {
@@ -13,9 +15,23 @@ export interface StreamDefinition {
   readonly lane: Lane;
   readonly inputs?: readonly string[];
   readonly sharing?: 'independent' | 'shared' | 'live';
+  /** Operator policy and domain function are explicit labels, not inferred from values. */
+  readonly operator?: string;
+  readonly domain?: string;
 }
 
-export interface EventBase {
+export interface ExecutionMetadata {
+  /** Groups the separately replayable input/output channels of an operator. */
+  readonly executionId: string;
+  readonly role: ExecutionRole;
+  readonly port: ExecutionPort;
+  /** Explicit inner ownership; distinct from synchronous subscription nesting. */
+  readonly ownerExecutionId?: string;
+  readonly innerIndex?: number;
+}
+
+/** Version 1 events have no execution metadata. Version 2 requires it on every event. */
+export interface EventBase extends Partial<ExecutionMetadata> {
   readonly seq: number;
   readonly at: number;
   readonly streamId: string;
@@ -33,11 +49,12 @@ export type TraceEvent = EventBase & (
   | { readonly kind: 'state'; readonly state: CapturedValue; readonly label: string }
 );
 export type EventKind = TraceEvent['kind'];
+export type RecordedTraceEvent = TraceEvent & ExecutionMetadata;
 
 /** An immutable retained prefix. Omitted suffix events are counted explicitly. */
 export interface Recording {
   readonly format: 'rxjs-replay';
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly rxjsVersion: '7.8.2';
   readonly name: string;
   readonly clock: { readonly name: string; readonly unit: 'ms' };
@@ -50,6 +67,10 @@ export interface Recording {
     readonly clockErrors: number;
     readonly stopped: boolean;
   };
+}
+export interface CurrentRecording extends Recording {
+  readonly schemaVersion: 2;
+  readonly events: readonly RecordedTraceEvent[];
 }
 
 export interface RecorderOptions {
@@ -67,21 +88,27 @@ export interface TraceOptions<T> {
 }
 export interface Recorder {
   readonly trace: <T>(streamId: string, options?: TraceOptions<T>) => MonoTypeOperatorFunction<T>;
-  readonly getRecording: () => Recording;
+  /** Delegates the latest-inner policy to RxJS 7.8.2 and records its actual executions. */
+  readonly switchMap: <T, O extends ObservableInput<unknown>>(streamId: string, project: (value: T, index: number) => O) => OperatorFunction<T, ObservedValueOf<O>>;
+  readonly getRecording: () => CurrentRecording;
   /** Stop capture only. Application subscriptions keep their ordinary lifecycle. */
-  readonly stop: () => Recording;
+  readonly stop: () => CurrentRecording;
 }
 
 export interface EventQuery {
   readonly streamId?: string;
   readonly subscriptionId?: string;
+  readonly executionId?: string;
+  readonly ownerExecutionId?: string;
+  readonly role?: ExecutionRole;
+  readonly port?: ExecutionPort;
   readonly kinds?: readonly EventKind[];
   readonly fromSeq?: number;
   readonly toSeq?: number;
   readonly fromTime?: number;
   readonly toTime?: number;
 }
-export interface SubscriptionView {
+export interface SubscriptionView extends Partial<ExecutionMetadata> {
   readonly id: string;
   readonly streamId: string;
   readonly start: TraceEvent;
