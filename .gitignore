@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.demo/
+coverage/
+*.tgz
+search-recording.json

@@ -1,0 +1,41 @@
+{
+  "name": "@hansschenker/rxjs-replay",
+  "version": "0.1.0",
+  "description": "Record RxJS executions, query captured history, and replay notifications with explicit time and cancellation.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" },
+    "./viewer": { "types": "./dist/viewer.d.ts", "import": "./dist/viewer.js", "default": "./dist/viewer.js" }
+  },
+  "files": ["dist", "src", "docs", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build && npm run demo:build",
+    "demo": "node scripts/demo.mjs",
+    "demo:build": "node scripts/demo.mjs --build",
+    "example": "node --import tsx examples/record-search.ts",
+    "prepack": "npm run build",
+    "prepare": "npm run build"
+  },
+  "peerDependencies": { "rxjs": "7.8.2" },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "esbuild": "0.28.2",
+    "linkedom": "0.18.14",
+    "rxjs": "7.8.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  },
+  "engines": { "node": ">=22.18" },
+  "repository": { "type": "git", "url": "git+https://github.com/hansschenker/rxjs-replay.git" },
+  "homepage": "https://github.com/hansschenker/rxjs-replay#readme",
+  "bugs": { "url": "https://github.com/hansschenker/rxjs-replay/issues" },
+  "license": "MIT",
+  "keywords": ["rxjs", "replay", "time-travel", "debugger", "observable", "typescript"]
+}

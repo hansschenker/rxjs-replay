@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>rxjs-replay · Explore a recorded execution</title>
+    <style>
+      *{box-sizing:border-box}body{margin:0;background:#0a1119;color:#e5edf6;font:15px/1.6 ui-sans-serif,system-ui,sans-serif}main{max-width:1400px;margin:0 auto;padding:48px 32px 32px}.intro{display:flex;justify-content:space-between;align-items:flex-end;gap:28px;margin-bottom:28px}.eyebrow{color:#6ce3b2;font-size:11px;letter-spacing:.17em;text-transform:uppercase;font-weight:700}h1{font-size:clamp(28px,4vw,40px);line-height:1.2;letter-spacing:-.035em;margin:10px 0}p{margin:0;color:#9eb1c3;max-width:700px}.scenario{min-width:230px}label{display:block;color:#9eb1c3;font-size:12px;margin-bottom:6px}select{background:#17222e;border:1px solid #3b4c5d;border-radius:8px;padding:10px 12px;color:#e5edf6;font:inherit;width:100%}.note{margin:24px 0;font-size:12px}a{color:#68c7f8;text-decoration:none}a:hover{text-decoration:underline}select:focus-visible{outline:2px solid #68c7f8;outline-offset:3px}@media(max-width:700px){main{padding:28px 14px}.intro{display:block}.scenario{margin-top:20px}}
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="intro">
+        <div>
+          <div class="eyebrow">RxJS 7.8.2 · TypeScript · Functional dataflow</div>
+          <h1>One execution. Every observation.</h1>
+          <p>Record values, subscriptions, cancellation, and state. Explore their history without rerunning application effects.</p>
+        </div>
+        <div class="scenario">
+          <label for="scenario">Load a demo scenario</label>
+          <select id="scenario">
+            <option value="search">switchMap · Only latest</option>
+            <option value="counter">scan · Remember state</option>
+          </select>
+        </div>
+      </div>
+      <div id="replay"></div>
+      <p class="note">These fixtures run once with a virtual scheduler. The viewer then reads their saved recordings. <a href="https://github.com/hansschenker/rxjs-replay">Source and documentation on GitHub ↗</a></p>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
